@@ -62,11 +62,11 @@ int Votes_Count; // number of votes registered
 // current vote state
 int CurrentVote_Index = -1;
 int CurrentVote_NumVotes = 0;
-char CurrentVote_Arguments[MAX_VOTES][MAX_VARIABLES];
+char CurrentVote_Arguments[MAX_VARIABLES][FIELD_MAX];
 Handle CurrentVote_Timer;
 
 // parsing nonsense
-Regex ArgSpecRegex = new Regex("([a-zA-Z0-9_]+)(:[a-z]+)?(=.+)?", PCRE_EXTENDED);
+Regex ArgSpecRegex;
 
 public void OnPluginStart() {
     // init config
@@ -84,6 +84,9 @@ public void OnPluginStart() {
     // init hooks
     HookConVarChange(CvarConfigPath, OnPathChange);
     HookConVarChange(CvarEnable, OnEnableChange);
+
+    // regex init
+    ArgSpecRegex = new Regex("([a-zA-Z0-9_]+)(:[a-z]+)?(=.+)?", PCRE_EXTENDED);
 
     // initialize configuration
     Enable = CvarEnable.IntValue;
@@ -318,7 +321,80 @@ bool ProcessArguments(int client, int index, int argc) {
     return true;
 }
 
-bool ProcessArgument(int client, char arg_specs[MAX_VARIABLES][FIELD_MAX], int argi, int argc) {
-    
+bool ProcessArgument(int client, const char arg_specs[MAX_VARIABLES][FIELD_MAX], int argi, int argc) {
+    char field_name[FIELD_MAX];
+    bool has_type;
+    char value_type[FIELD_MAX];
+    bool has_default;
+    char value_default[FIELD_MAX];
+
+    if (!ParseArgumentSpec(arg_specs[argi], field_name, value_type, has_type, value_default, has_default)) {
+        LogMessage("error: argument spec '%s' is invalid", arg_specs[argi]);
+        ReplyToCommand(client, "There is an error with the voting configuration. Tell an admin!");
+        return false;
+    }
+
+    if (argi < argc) {
+        GetCmdArg(argi + 1, CurrentVote_Arguments[argi], FIELD_MAX);
+        if (has_type && !ValidateArgument(client, value_type, CurrentVote_Arguments[argi])) {
+            ReplyToCommand(client, "Argument '%s' is not a valid %s", CurrentVote_Arguments[argi], value_type);
+            return false;
+        }
+    }
+    else if(has_default) {
+        strcopy(CurrentVote_Arguments[argi], FIELD_MAX, value_default);
+    }
+    else {
+        ReplyToCommand(client, "Missing a required argument: %s", field_name);
+        return false;
+    }
+
+    return true;
+}
+
+bool ParseArgumentSpec(const char arg_spec[FIELD_MAX], char field_name[FIELD_MAX], char value_type[FIELD_MAX], bool& has_type, char value_default[FIELD_MAX], bool& has_default) {
+    char temp[FIELD_MAX];
+
+    if (ArgSpecRegex.Match(arg_spec) < 0) {
+        return false;
+    }
+
+    if (!ArgSpecRegex.GetSubString(1, field_name, FIELD_MAX, 0)) {
+        return false;
+    }
+
+    if ((has_type = ArgSpecRegex.GetSubString(2, temp, FIELD_MAX, 0))) {
+        strcopy(value_type, FIELD_MAX, temp[1]);
+    }
+
+    if ((has_default = ArgSpecRegex.GetSubString(3, temp, FIELD_MAX, 0))) {
+        strcopy(value_default, FIELD_MAX, temp[1]);
+    }
+
+    return true;
+}
+
+bool ValidateArgument(int client, const char value_type[FIELD_MAX], const char value[FIELD_MAX]) {
+    if (strcmp(value_type, "target", false) == 0) {
+        if (FindTarget(client, value, true, false) < 0) {
+            return false;
+        }
+    }
+    else if(strcmp(value_type, "integer", false) == 0) {
+        int dummy;
+        if (StringToIntEx(value, dummy) != strlen(value)) {
+            return false;
+        }
+    }
+    else if (strcmp(value_type, "number",false ) == 0) {
+        float dummy;
+        if (StringToFloatEx(value, dummy) != strlen(value)) {
+            return false;
+        }
+    }
+    else {
+        LogMessage("warning: ignoring unknown validation type '%s'", value_type);
+    }
+
     return true;
 }
