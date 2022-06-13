@@ -64,6 +64,7 @@ int CurrentVote_Index = -1;
 int CurrentVote_NumVotes = 0;
 char CurrentVote_Arguments[MAX_VARIABLES][FIELD_MAX];
 Handle CurrentVote_Timer;
+StringMap CurrentVote_Voters;
 
 // parsing nonsense
 Regex ArgSpecRegex;
@@ -85,8 +86,10 @@ public void OnPluginStart() {
     HookConVarChange(CvarConfigPath, OnPathChange);
     HookConVarChange(CvarEnable, OnEnableChange);
 
-    // regex init
+    // init objects
     ArgSpecRegex = new Regex("([a-zA-Z0-9_]+)(:[a-z]+)?(=.+)?", PCRE_EXTENDED);
+    Votes_TriggerMap = new StringMap();
+    CurrentVote_Voters = new StringMap();
 
     // initialize configuration
     Enable = CvarEnable.IntValue;
@@ -291,7 +294,8 @@ Action VoteCommandHandler(int client, const char[] command, int argc) {
 
     // check that the vote is not in cooldown
     // note: 2038 problem here probably
-    int time_since_vote = GetTime() - Votes_LastInvoked[index];
+    int current_time = GetTime();
+    int time_since_vote = current_time - Votes_LastInvoked[index];
     int cooldown_remaining = RoundToCeil(Votes_Cooldown[index] - time_since_vote);
     if (cooldown_remaining > 0) {
         ReplyToCommand(client, "This vote occurred recently and cannot be called again for %d seconds", cooldown_remaining);
@@ -302,6 +306,11 @@ Action VoteCommandHandler(int client, const char[] command, int argc) {
     if (!ProcessArguments(client, index, argc)) {
         return Plugin_Continue;
     }
+
+    // set up state and create ui
+    InitiateVote(client, index);
+
+    CurrentVote_NumVotes = 0;
 
     return Plugin_Continue;
 }
@@ -386,7 +395,7 @@ bool ValidateArgument(int client, const char value_type[FIELD_MAX], const char v
             return false;
         }
     }
-    else if (strcmp(value_type, "number",false ) == 0) {
+    else if (strcmp(value_type, "number", false ) == 0) {
         float dummy;
         if (StringToFloatEx(value, dummy) != strlen(value)) {
             return false;
@@ -397,4 +406,76 @@ bool ValidateArgument(int client, const char value_type[FIELD_MAX], const char v
     }
 
     return true;
+}
+
+// vote states
+
+void InitiateVote(int client, int index) {
+    CurrentVote_Index = index;
+    CurrentVote_NumVotes = 0;
+    CurrentVote_Voters.Clear();
+
+    // start timeout timer if necessary
+    if (Votes_Duration[index] >= 0) {
+        CurrentVote_Timer = CreateTimer(Votes_Duration[index], VoteTimeout);
+    }
+
+    // TODO
+
+}
+
+Action VoteTimeout(Handle timer) {
+    EndVoteWithFailure();
+}
+
+void EndVoteWithSuccess() {
+    // TODO
+}
+
+void EndVoteWithFailure() {
+    // TODO
+}
+
+bool CheckVoteCompletion() {
+    // TODO: exclude spectators?
+    int num_clients = GetClientCount(true);
+    if (Votes_Count >= RoundToCeil(Votes_Ratio[CurrentVote_Index] * num_clients)) {
+        EndVoteWithSuccess();
+        return true;
+    }
+    return false;
+}
+
+void ClientVoted(int client) {
+    if (CurrentVote_Index < 0) {
+        ReplyToCommand(client, "No vote is in progress");
+        return;
+    }
+
+    char client_auth[FIELD_MAX];
+    if (!GetClientAuthId(client, AuthId_Engine, client_auth, FIELD_MAX, true)) {
+        ReplyToCommand(client, "Sorry, your vote was not counted because your Steam credentials could not be validated");
+        return;
+    }
+
+    int dummy = 0;
+    if (CurrentVote_Voters.GetValue(client_auth, dummy)) {
+        ReplyToCommand(client, "You already voted");
+        return;
+    }
+
+    CurrentVote_Voters.SetValue(client_auth, dummy);
+
+
+}
+
+// engine callbacks
+
+public void OnClientConnected(int client) {
+    // TODO
+}
+
+
+public void OnClientDisconnect(int client) {
+    CheckVoteCompletion();
 }
