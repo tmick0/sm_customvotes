@@ -4,6 +4,8 @@
 #include <adt_trie>
 #include <textparse>
 #include <regex>
+#include <sdktools>
+#include <cstrike>
 
 #pragma newdecls required
 
@@ -36,6 +38,10 @@ public Plugin myinfo =
 #define MAX_VARIABLES 8
 #define FIELD_MAX 128
 
+// additional constants
+#define MENU_YES 5
+#define MENU_NO 6
+
 // convars
 ConVar CvarConfigPath;
 ConVar CvarEnable;
@@ -61,10 +67,12 @@ int Votes_Count; // number of votes registered
 
 // current vote state
 int CurrentVote_Index = -1;
-int CurrentVote_NumVotes = 0;
+int CurrentVote_NumVotesYes = 0;
+int CurrentVote_NumVotesNo = 0;
 char CurrentVote_Arguments[MAX_VARIABLES][FIELD_MAX];
 Handle CurrentVote_Timer;
 StringMap CurrentVote_Voters;
+Menu CurrentVote_Menu;
 
 // parsing nonsense
 Regex ArgSpecRegex;
@@ -85,6 +93,7 @@ public void OnPluginStart() {
     // init hooks
     HookConVarChange(CvarConfigPath, OnPathChange);
     HookConVarChange(CvarEnable, OnEnableChange);
+    HookEvent("player_team", OnTeamChange);
 
     // init objects
     ArgSpecRegex = new Regex("([a-zA-Z0-9_]+)(:[a-z]+)?(=.+)?", PCRE_EXTENDED);
@@ -310,8 +319,6 @@ Action VoteCommandHandler(int client, const char[] command, int argc) {
     // set up state and create ui
     InitiateVote(client, index);
 
-    CurrentVote_NumVotes = 0;
-
     return Plugin_Continue;
 }
 
@@ -412,7 +419,8 @@ bool ValidateArgument(int client, const char value_type[FIELD_MAX], const char v
 
 void InitiateVote(int client, int index) {
     CurrentVote_Index = index;
-    CurrentVote_NumVotes = 0;
+    CurrentVote_NumVotesYes = 0;
+    CurrentVote_NumVotesNo = 0;
     CurrentVote_Voters.Clear();
 
     // start timeout timer if necessary
@@ -420,8 +428,45 @@ void InitiateVote(int client, int index) {
         CurrentVote_Timer = CreateTimer(Votes_Duration[index], VoteTimeout);
     }
 
-    // TODO
+    CurrentVote_Menu = new Menu(ReceiveClientVote);
+    CurrentVote_Menu.RemoveAllItems();
 
+        
+    if (// add dummy entries in the first 5 slots
+        !CurrentVote_Menu.AddItem("", "", ITEMDRAW_DISABLED) ||
+        !CurrentVote_Menu.AddItem("", "", ITEMDRAW_DISABLED) ||
+        !CurrentVote_Menu.AddItem("", "", ITEMDRAW_DISABLED) ||
+        !CurrentVote_Menu.AddItem("", "", ITEMDRAW_DISABLED) ||
+        !CurrentVote_Menu.AddItem("", "", ITEMDRAW_DISABLED) ||
+
+        // actual voting
+        !CurrentVote_Menu.AddItem("Yes", "Yes") ||
+        !CurrentVote_Menu.AddItem("No", "No")) {
+        LogMessage("error: failed to create menu");
+    }
+
+}
+
+int ReceiveClientVote(Menu menu, MenuAction action, int client, int selection) {
+    if (menu != CurrentVote_Menu) {
+        return 0;
+    }
+
+    if (action != MenuAction_Select) {
+        return 0;
+    }
+
+    if (selection == MENU_YES) {
+        ClientVoted(client, true);
+    }
+    else if (selection == MENU_NO) {
+        ClientVoted(client, false);
+    }
+    else {
+        // TODO
+    }
+
+    return 0;
 }
 
 Action VoteTimeout(Handle timer) {
@@ -437,8 +482,7 @@ void EndVoteWithFailure() {
 }
 
 bool CheckVoteCompletion() {
-    // TODO: exclude spectators?
-    int num_clients = GetClientCount(true);
+    int num_clients = CountEligibleClients();
     if (Votes_Count >= RoundToCeil(Votes_Ratio[CurrentVote_Index] * num_clients)) {
         EndVoteWithSuccess();
         return true;
@@ -446,7 +490,7 @@ bool CheckVoteCompletion() {
     return false;
 }
 
-void ClientVoted(int client) {
+void ClientVoted(int client, bool yes) {
     if (CurrentVote_Index < 0) {
         ReplyToCommand(client, "No vote is in progress");
         return;
@@ -466,10 +510,24 @@ void ClientVoted(int client) {
 
     CurrentVote_Voters.SetValue(client_auth, dummy);
 
+    if (yes) {
+        CurrentVote_NumVotesYes += 1;
+    }
+    else {
+        CurrentVote_NumVotesNo += 1;
+    }
 
+    CheckVoteCompletion();
 }
 
-// engine callbacks
+
+
+// player management
+
+int CountEligibleClients() {
+    // TODO: support for other games than csgo
+    return GetTeamClientCount(CS_TEAM_T) + GetTeamClientCount(CS_TEAM_CT);
+}
 
 public void OnClientConnected(int client) {
     // TODO
@@ -478,4 +536,11 @@ public void OnClientConnected(int client) {
 
 public void OnClientDisconnect(int client) {
     CheckVoteCompletion();
+}
+
+public Action OnTeamChange(Event event, const char[] name, bool dontBroadcast) {
+    if (!CheckVoteCompletion()) {
+        // TODO
+    }
+    return Plugin_Continue;
 }
