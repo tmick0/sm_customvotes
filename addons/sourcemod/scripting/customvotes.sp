@@ -41,6 +41,11 @@ public Plugin myinfo =
 // additional constants
 #define MENU_YES 5
 #define MENU_NO 6
+#define ELIGIBLE 0
+#define INELIGIBLE_REASON_CLIENT 1
+#define INELIGIBLE_REASON_AUTH 2
+#define INELIGIBLE_REASON_VOTED 3
+#define INELIGIBLE_REASON_TEAM 4
 
 // convars
 ConVar CvarConfigPath;
@@ -72,10 +77,11 @@ int CurrentVote_NumVotesNo = 0;
 char CurrentVote_Arguments[MAX_VARIABLES][FIELD_MAX];
 Handle CurrentVote_Timer;
 StringMap CurrentVote_Voters;
-Menu CurrentVote_Menu;
+StringMap CurrentVote_Menus;
 
 // parsing nonsense
 Regex ArgSpecRegex;
+int ParseDepth;
 
 public void OnPluginStart() {
     // init config
@@ -160,6 +166,7 @@ void ReloadConfig() {
     UnregisterTriggers();
 
     Votes_Count = 0;
+    ParseDepth = 0;
     
     int line;
     int col;
@@ -183,7 +190,9 @@ void ReloadConfig() {
 }
 
 SMCResult Parse_NewSection(SMCParser smc, const char[] name, bool quoted) {
-    // TODO: handle skipping the root section here
+    if (ParseDepth++ == 0) {
+        return SMCParse_Continue;
+    }
 
     if (Votes_Count >= MAX_VOTES) {
         LogMessage("error: too many custom votes, a maximum of %d is supported", MAX_VOTES);
@@ -213,6 +222,10 @@ SMCResult Parse_NewSection(SMCParser smc, const char[] name, bool quoted) {
 }
 
 SMCResult Parse_EndSection(SMCParser smc) {
+    if (--ParseDepth == 0) {
+        return SMCParse_Continue;
+    }
+
     int errors = 0;
 
     if (strlen(Votes_VoteText[Votes_Count]) <= 0) {
@@ -417,54 +430,99 @@ bool ValidateArgument(int client, const char value_type[FIELD_MAX], const char v
 
 // vote states
 
+void ShowVoteToClient(int client) {
+    char client_auth[FIELD_MAX];
+    if (!GetClientAuthKey(client, client_auth)) {
+        return;
+    }
+
+    Menu menu = new Menu(ReceiveClientVote);
+    menu.RemoveAllItems();
+
+    if (// add dummy entries in the first 5 slots
+        !menu.AddItem("", "", ITEMDRAW_DISABLED) ||
+        !menu.AddItem("", "", ITEMDRAW_DISABLED) ||
+        !menu.AddItem("", "", ITEMDRAW_DISABLED) ||
+        !menu.AddItem("", "", ITEMDRAW_DISABLED) ||
+        !menu.AddItem("", "", ITEMDRAW_DISABLED) ||
+
+        // actual voting
+        !menu.AddItem("Yes", "Yes") ||
+        !menu.AddItem("No", "No")) {
+        LogMessage("error: failed to create menu for client %d", client);
+    }
+
+    int clients[1];
+    clients[0] = client;
+    menu.DisplayVote(clients, 1, 9999);
+    
+    CurrentVote_Menus.SetValue(client_auth, menu);
+}
+
 void InitiateVote(int client, int index) {
     CurrentVote_Index = index;
     CurrentVote_NumVotesYes = 0;
     CurrentVote_NumVotesNo = 0;
     CurrentVote_Voters.Clear();
+    // note args have already been parsed
 
     // start timeout timer if necessary
     if (Votes_Duration[index] >= 0) {
         CurrentVote_Timer = CreateTimer(Votes_Duration[index], VoteTimeout);
+    } else {
+        CurrentVote_Timer = null;
     }
 
-    CurrentVote_Menu = new Menu(ReceiveClientVote);
-    CurrentVote_Menu.RemoveAllItems();
-
-        
-    if (// add dummy entries in the first 5 slots
-        !CurrentVote_Menu.AddItem("", "", ITEMDRAW_DISABLED) ||
-        !CurrentVote_Menu.AddItem("", "", ITEMDRAW_DISABLED) ||
-        !CurrentVote_Menu.AddItem("", "", ITEMDRAW_DISABLED) ||
-        !CurrentVote_Menu.AddItem("", "", ITEMDRAW_DISABLED) ||
-        !CurrentVote_Menu.AddItem("", "", ITEMDRAW_DISABLED) ||
-
-        // actual voting
-        !CurrentVote_Menu.AddItem("Yes", "Yes") ||
-        !CurrentVote_Menu.AddItem("No", "No")) {
-        LogMessage("error: failed to create menu");
+    int clients[MAXPLAYERS];
+    int numclients = CollectEligibleVoters(clients);
+    for (int i = 0; i < numclients; ++i) {
+        if (client != i) {
+            ShowVoteToClient(i);
+        }
     }
 
+    ClientVoted(client, true);
+}
+
+void RemoveVoteFromClient(int client) {
+    char client_auth[FIELD_MAX];
+    if (!GetClientAuthKey(client, client_auth)) {
+        return;
+    }
+
+    Menu menu;
+    if (CurrentVote_Menus.GetValue(client_auth, menu)) {
+        menu.Cancel();
+        CurrentVote_Menus.Remove(client_auth);
+        CloseHandle(menu);
+    }
 }
 
 int ReceiveClientVote(Menu menu, MenuAction action, int client, int selection) {
-    if (menu != CurrentVote_Menu) {
-        return 0;
-    }
-
     if (action != MenuAction_Select) {
         return 0;
     }
 
-    if (selection == MENU_YES) {
-        ClientVoted(client, true);
+    char client_auth[FIELD_MAX];
+    if (!GetClientAuthKey(client, client_auth)) {
+        return 0;
     }
-    else if (selection == MENU_NO) {
-        ClientVoted(client, false);
+
+    Menu known_menu;
+    if (!CurrentVote_Menus.GetValue(client_auth, known_menu)) {
+        return 0;
     }
-    else {
-        // TODO
+
+    if (menu != known_menu) {
+        return 0;
     }
+
+    if (selection != MENU_YES && selection != MENU_NO) {
+        return 0;
+    }
+
+    RemoveVoteFromClient(client);
+    ClientVoted(client, selection == MENU_YES);
 
     return 0;
 }
@@ -474,41 +532,89 @@ Action VoteTimeout(Handle timer) {
 }
 
 void EndVoteWithSuccess() {
-    // TODO
+    MessageVoteCompletion(true);
+    ExecuteCommand();
+    ResetVoteState();
 }
 
 void EndVoteWithFailure() {
-    // TODO
+    MessageVoteCompletion(false);
+    ResetVoteState();
+}
+
+void ResetVoteState() {
+    CurrentVote_Index = -1;
+    CurrentVote_NumVotesYes = 0;
+    CurrentVote_NumVotesNo = 0;
+
+    if (CurrentVote_Timer != null) {
+        KillTimer(CurrentVote_Timer);
+        CurrentVote_Timer = null;
+    }
+
+    char tmp[FIELD_MAX];
+    StringMapSnapshot keys = CurrentVote_Menus.Snapshot();
+    for (int i = 0; i < keys.Length; ++i) {
+        Menu menu;
+        keys.GetKey(i, tmp, FIELD_MAX);
+        if (CurrentVote_Menus.GetValue(tmp, menu)) {
+            menu.Cancel();
+            CloseHandle(menu);
+        }
+    }
+    CloseHandle(keys);
+
+    CurrentVote_Voters.Clear();
+    CurrentVote_Menus.Clear();
 }
 
 bool CheckVoteCompletion() {
-    int num_clients = CountEligibleClients();
-    if (Votes_Count >= RoundToCeil(Votes_Ratio[CurrentVote_Index] * num_clients)) {
+    int num_clients = CountElectorate();
+    if (CurrentVote_NumVotesYes >= RoundToCeil(Votes_Ratio[CurrentVote_Index] * num_clients)) {
         EndVoteWithSuccess();
+        return true;
+    }
+    if (CurrentVote_NumVotesNo >= RoundToCeil((1.0 - Votes_Ratio[CurrentVote_Index]) * num_clients))  {
+        EndVoteWithFailure();
         return true;
     }
     return false;
 }
 
 void ClientVoted(int client, bool yes) {
+    char client_auth[FIELD_MAX];
+    if (!GetClientAuthKey(client, client_auth)) {
+        return;
+    }
+
     if (CurrentVote_Index < 0) {
         ReplyToCommand(client, "No vote is in progress");
         return;
     }
 
-    char client_auth[FIELD_MAX];
-    if (!GetClientAuthId(client, AuthId_Engine, client_auth, FIELD_MAX, true)) {
-        ReplyToCommand(client, "Sorry, your vote was not counted because your Steam credentials could not be validated");
+    int reason;
+    if (!ClientIsEligibleToVote(client, reason)) {
+        switch(reason) {
+            case INELIGIBLE_REASON_CLIENT: {
+                ReplyToCommand(client, "Vote not counted because you are not logged in");
+            }
+            case INELIGIBLE_REASON_AUTH: {
+                ReplyToCommand(client, "Vote not counted because you are not logged in");
+            }
+            case INELIGIBLE_REASON_VOTED: {
+                ReplyToCommand(client, "You have already voted");
+            }
+            case INELIGIBLE_REASON_TEAM: {
+                ReplyToCommand(client, "Spectators cannot vote");
+            }
+            default: {
+                ReplyToCommand(client, "Something went wrong");
+            }
+        }
         return;
     }
 
-    int dummy = 0;
-    if (CurrentVote_Voters.GetValue(client_auth, dummy)) {
-        ReplyToCommand(client, "You already voted");
-        return;
-    }
-
-    CurrentVote_Voters.SetValue(client_auth, dummy);
+    CurrentVote_Voters.SetValue(client_auth, yes);
 
     if (yes) {
         CurrentVote_NumVotesYes += 1;
@@ -517,30 +623,190 @@ void ClientVoted(int client, bool yes) {
         CurrentVote_NumVotesNo += 1;
     }
 
+    MessageVoteProgress(client, yes);
     CheckVoteCompletion();
 }
 
-
-
 // player management
 
-int CountEligibleClients() {
+int CountElectorate() {
+    // exclude spectators from voting
     // TODO: support for other games than csgo
     return GetTeamClientCount(CS_TEAM_T) + GetTeamClientCount(CS_TEAM_CT);
 }
 
-public void OnClientConnected(int client) {
-    // TODO
+bool ClientHasVoted(int client, bool& vote) {
+    char client_auth[FIELD_MAX];
+    if (!GetClientAuthKey(client, client_auth)) {
+        return false;
+    }
+    return ClientAuthHasVoted(client_auth, vote);
 }
 
+bool ClientHasVoteActive(int client) {
+    char client_auth[FIELD_MAX];
+    if (!GetClientAuthKey(client, client_auth)) {
+        return false;
+    }
+
+    Menu dummy;
+    return CurrentVote_Menus.GetValue(client_auth, dummy);
+}
+
+bool ClientAuthHasVoted(char client_auth[FIELD_MAX], bool& vote) {
+    return CurrentVote_Voters.GetValue(client_auth, vote);
+}
+
+bool GetClientAuthKey(int client, char client_auth[FIELD_MAX]) {
+    return GetClientAuthId(client, AuthId_Engine, client_auth, FIELD_MAX, true);
+}
+
+bool ClientIsEligibleToVote(int client, int& reason) {
+    if (!IsClientInGame(client) || IsFakeClient(client)) {
+        reason = INELIGIBLE_REASON_CLIENT;
+        return false;
+    }
+
+    char client_auth[FIELD_MAX];
+    if (!GetClientAuthKey(client, client_auth)) {
+        reason = INELIGIBLE_REASON_AUTH;
+        return false;
+    }
+
+    bool dummy;
+    if (ClientAuthHasVoted(client_auth, dummy)) {
+        reason = INELIGIBLE_REASON_VOTED;
+        return false;
+    }
+
+    // TODO: support for other games than csgo
+    int team = GetClientTeam(client);
+    if (team != CS_TEAM_T && team != CS_TEAM_CT) {
+        reason = INELIGIBLE_REASON_TEAM;
+        return false;
+    }
+
+    reason = ELIGIBLE;
+    return true;
+}
+
+int CollectEligibleVoters(int[] clients) {
+    int count = 0;
+    int dummy;
+    for (int i = 1; i < MAXPLAYERS; ++i) {
+        if (ClientIsEligibleToVote(i, dummy)) {
+            clients[count++] = i;
+        }
+    }
+    return count;
+}
 
 public void OnClientDisconnect(int client) {
     CheckVoteCompletion();
 }
 
 public Action OnTeamChange(Event event, const char[] name, bool dontBroadcast) {
-    if (!CheckVoteCompletion()) {
-        // TODO
+    if (CurrentVote_Index < 0) {
+        return Plugin_Continue;
     }
+
+    int dummy;
+    int client = GetClientOfUserId(GetEventInt(event, "userid"));
+    bool active = ClientHasVoteActive(client);
+    bool eligible = ClientIsEligibleToVote(client, dummy);
+
+    if (eligible) {
+        if (!active) {
+             // client is now eligible to vote, give them the menu
+             ShowVoteToClient(client);
+        }
+    }
+    else {
+        if (active) {
+            // client is no longer eligible to vote, take away the menu
+            RemoveVoteFromClient(client);
+        }
+
+        bool vote;
+        if (ClientHasVoted(client, vote)) {
+            // un-count their vote
+            if (vote) {
+                --CurrentVote_NumVotesYes;
+            }
+            else {
+                --CurrentVote_NumVotesNo;
+            }
+        }
+
+        // a client becoming ineligible can cause the vote to complete
+        CheckVoteCompletion();
+    }
+
     return Plugin_Continue;
 }
+
+// variable handling
+
+void ReplaceVariablesInString(char string[FIELD_MAX], char[] player) {
+    char tmp[FIELD_MAX];
+
+    // replace custom variables
+    char arg_specs[MAX_VARIABLES][FIELD_MAX];
+    int num_variables = ExplodeString(Votes_Arguments[CurrentVote_Index], ",", arg_specs, MAX_VARIABLES, FIELD_MAX, false);
+    for (int i = 0; i < num_variables; ++i) {
+        char field_name[FIELD_MAX];
+        bool has_type;
+        char value_type[FIELD_MAX];
+        bool has_default;
+        char value_default[FIELD_MAX];
+        if (ParseArgumentSpec(arg_specs[i], field_name, value_type, has_type, value_default, has_default)) {
+            Format(tmp, FIELD_MAX, "${%s}", field_name);
+            ReplaceString(string, FIELD_MAX, tmp, CurrentVote_Arguments[i]);
+        }
+    }
+
+    // replace predefined variables
+    ReplaceString(string, FIELD_MAX, "${vote_voter}", player);
+    ReplaceString(string, FIELD_MAX, "${vote_name}", Votes_Name[CurrentVote_Index]);
+    Format(tmp, FIELD_MAX, "%d", CurrentVote_NumVotesYes);
+    ReplaceString(string, FIELD_MAX, "${vote_count}", tmp);
+    Format(tmp, FIELD_MAX, "%d", RoundToCeil(Votes_Ratio[CurrentVote_Index] * CountElectorate()));
+    ReplaceString(string, FIELD_MAX, "${vote_required}", tmp);
+}
+
+void ExecuteCommand() {
+    char command[FIELD_MAX];
+    strcopy(command, FIELD_MAX, Votes_Command[CurrentVote_Index]);
+    char name[1];
+    ReplaceVariablesInString(command, name);
+    ServerCommand(command);
+}
+
+// chat messages
+
+void MessageVoteProgress(int client, bool yes) {
+    if (yes) {
+        char name[FIELD_MAX];
+        GetClientName(client, name, FIELD_MAX);
+
+        char message[FIELD_MAX];
+        strcopy(message, FIELD_MAX, Votes_VoteText[CurrentVote_Index]);
+
+        ReplaceVariablesInString(message, name);
+        PrintToChatAll(message);
+    }
+}
+
+void MessageVoteCompletion(bool yes) {
+    char message[FIELD_MAX];
+    char name[1];
+    if (yes) {
+        strcopy(message, FIELD_MAX, Votes_PassText[CurrentVote_Index]);
+    }
+    else {
+        strcopy(message, FIELD_MAX, Votes_FailText[CurrentVote_Index]);
+    }
+    ReplaceVariablesInString(message, name);
+    PrintToChatAll(message);
+}
+
