@@ -702,7 +702,9 @@ int CollectEligibleVoters(int[] clients) {
 }
 
 public void OnClientDisconnect(int client) {
-    CheckVoteCompletion();
+    if (CurrentVote_Index >= 0) {
+        CheckVoteCompletion();
+    }
 }
 
 public Action OnTeamChange(Event event, const char[] name, bool dontBroadcast) {
